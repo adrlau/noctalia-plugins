@@ -16,6 +16,29 @@
       ],
       "lastUpdated": "2026-02-04T23:08:01-07:00"
     },
+
+    {
+      "id": "enhanced-assistant",
+      "name": "Enhanced AI Assistant",
+      "version": "3.0.0",
+      "official": false,
+      "author": "opencode",
+      "description": "Improved AI Chat panel with OpenAI API support, Markdown, KaTeX and Syntax Highlighting",
+      "repository": "https://github.com/noctalia-dev/noctalia-plugins",
+      "minNoctaliaVersion": "4.1.2",
+      "license": "MIT",
+      "tags": [
+        "Bar",
+        "Panel",
+        "AI",
+        "Productivity",
+        "Markdown",
+        "KaTeX"
+      ],
+      "lastUpdated": "2026-02-10T12:00:00+00:00"
+    },
+
+
     {
       "id": "assistant-panel",
       "name": "Assistant Panel",

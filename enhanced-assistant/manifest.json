@@ -1,0 +1,46 @@
+{
+  "id": "enhanced-assistant",
+  "name": "Enhanced AI Assistant",
+  "version": "3.0.0",
+  "minNoctaliaVersion": "4.1.2",
+  "author": "opencode",
+  "license": "MIT",
+  "repository": "https://github.com/noctalia-dev/noctalia-plugins",
+  "description": "Improved AI Chat panel with OpenAI API support, Markdown, KaTeX and Syntax Highlighting",
+  "tags": [
+    "Bar",
+    "Panel",
+    "AI",
+    "Productivity",
+    "Markdown",
+    "KaTeX"
+  ],
+  "entryPoints": {
+    "main": "Main.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml",
+    "settings": "Settings.qml"
+  },
+  "dependencies": {
+    "plugins": []
+  },
+  "metadata": {
+    "defaultSettings": {
+      "maxHistoryLength": 100,
+      "panelDetached": true,
+      "panelPosition": "right",
+      "panelHeightRatio": 0.85,
+      "panelWidth": 520,
+      "scale": 1,
+      "ai": {
+        "model": "gpt-4o-mini",
+        "apiKey": "",
+        "temperature": 0.7,
+        "systemPrompt": "You are a helpful assistant integrated into a Linux desktop shell. Be concise and helpful.",
+        "maxHistoryLength": 100,
+        "openaiLocal": false,
+        "openaiBaseUrl": "https://api.openai.com/v1/chat/completions"
+      }
+    }
+  }
+}
