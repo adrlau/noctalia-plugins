@@ -25,6 +25,8 @@ Item {
 
   property string enlargedImage: ""
   readonly property var pendingToolCall: mainInstance?.pendingToolCall || null
+  readonly property bool toolsEnabled: mainInstance?.toolsEnabled ?? true
+  readonly property bool autoApproveTools: mainInstance?.autoApproveTools ?? false
 
   DropArea {
     anchors.fill: parent
@@ -359,13 +361,13 @@ Item {
       }
     }
 
-    // Tool Confirmation
+    // Tool Confirmation - only shown when there's a pending tool
     Rectangle {
       Layout.fillWidth: true
       Layout.preferredHeight: toolConfirmRow.implicitHeight + Style.marginS * 2
       color: Color.mSurfaceVariant
       radius: Style.radiusM
-      visible: root.pendingToolCall !== null
+      visible: root.toolsEnabled && root.pendingToolCall !== null && !root.autoApproveTools
 
       RowLayout {
         id: toolConfirmRow
@@ -409,6 +411,86 @@ Item {
             backgroundColor: Color.mSurface
             textColor: Color.mOnSurface
             onClicked: mainInstance.confirmToolExecution(false)
+          }
+        }
+      }
+    }
+
+    // Auto-approve toggle - always visible when tools are enabled
+    Rectangle {
+      Layout.fillWidth: true
+      Layout.preferredHeight: autoApproveRow.implicitHeight + Style.marginS * 2
+      color: Color.mSurfaceVariant
+      radius: Style.radiusM
+      visible: root.toolsEnabled
+      opacity: 0.8
+
+      RowLayout {
+        id: autoApproveRow
+        anchors.fill: parent
+        anchors.margins: Style.marginS
+        spacing: Style.marginS
+        
+        NIcon {
+          icon: "shield-check"
+          color: Color.mOnSurfaceVariant
+          pointSize: Style.fontSizeS
+        }
+        
+        NText {
+          text: "Auto-approve AI tools"
+          pointSize: Style.fontSizeXS
+          color: Color.mOnSurfaceVariant
+          Layout.fillWidth: true
+        }
+        
+        Rectangle {
+          width: 40
+          height: 20
+          radius: 10
+          color: autoApproveToggleMouse.containsMouse ? Color.mSurface : "transparent"
+          
+          Row {
+            anchors.centerIn: parent
+            spacing: 2
+            
+            Rectangle {
+              width: 16
+              height: 16
+              radius: 8
+              color: root.autoApproveTools ? Color.mPrimary : Color.mSurfaceVariant
+              border.color: Color.mOutline
+              border.width: 1
+              
+              NIcon {
+                anchors.centerIn: parent
+                icon: "check"
+                color: Color.mOnPrimary
+                pointSize: 10
+                visible: root.autoApproveTools
+              }
+            }
+            
+            NText {
+              text: root.autoApproveTools ? "On" : "Off"
+              pointSize: Style.fontSizeXS
+              color: Color.mOnSurfaceVariant
+            }
+          }
+          
+          MouseArea {
+            id: autoApproveToggleMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+              // Toggle the setting in mainInstance
+              if (mainInstance && mainInstance.pluginApi) {
+                if (!mainInstance.pluginApi.pluginSettings.ai) mainInstance.pluginApi.pluginSettings.ai = {};
+                mainInstance.pluginApi.pluginSettings.ai.autoApproveTools = !root.autoApproveTools;
+                mainInstance.pluginApi.saveSettings();
+              }
+            }
           }
         }
       }

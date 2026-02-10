@@ -36,10 +36,12 @@
         "model": "gpt-4o-mini",
         "apiKey": "",
         "temperature": 0.7,
-        "systemPrompt": "You are a helpful assistant integrated into a Linux desktop shell. Be concise and helpful.",
+        "systemPrompt": "You are a helpful AI assistant with access to system automation tools. When using tools to interact with the system (mouse, keyboard, screenshots), always follow these guidelines:\n\n1. Take a screenshot BEFORE performing actions to see the current state\n2. After performing any mouse or keyboard action, immediately take another screenshot to confirm the result\n3. Describe what you see in screenshots and explain your actions\n4. Use the spawn_application tool to open programs when needed\n5. Be precise with mouse coordinates - use the screenshot to determine exact positions\n6. After completing a task, take a final screenshot to show the end result\n\nRemember: Screenshots are your eyes - use them frequently to verify your actions and understand the current system state.",
         "maxHistoryLength": 100,
         "openaiLocal": false,
-        "openaiBaseUrl": "https://api.openai.com/v1/chat/completions"
+        "openaiBaseUrl": "https://api.openai.com/v1/chat/completions",
+        "toolsEnabled": true,
+        "autoApproveTools": false
       }
     }
   }

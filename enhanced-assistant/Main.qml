@@ -22,6 +22,12 @@ Item {
 
   // Tool Confirmation State
   property var pendingToolCall: null // { id, name, args }
+  property var processedToolCallIds: [] // Track which tool calls have been prompted for confirmation
+  property var executingToolCallIds: [] // Track which tool calls are currently executing
+  property var sentToolResultIds: [] // Track which tool results have been sent back to the API
+  property string lastToolCallId: "" // Track screenshot tool calls
+  property bool screenshotInProgress: false
+  property int clipboardRetries: 0 // Track clipboard retries
 
   // Cache directory for state (messages)
   readonly property string cacheDir: typeof Settings !== 'undefined' && Settings.cacheDir ? Settings.cacheDir + "plugins/enhanced-assistant/" : ""
@@ -105,6 +111,8 @@ Item {
   readonly property real temperature: pluginApi?.pluginSettings?.ai?.temperature || 0.7
   readonly property string systemPrompt: pluginApi?.pluginSettings?.ai?.systemPrompt || ""
   readonly property int maxImageDimension: pluginApi?.pluginSettings?.ai?.maxImageDimension || 800
+  readonly property bool toolsEnabled: pluginApi?.pluginSettings?.ai?.toolsEnabled ?? true
+  readonly property bool autoApproveTools: pluginApi?.pluginSettings?.ai?.autoApproveTools ?? false
   readonly property bool openaiLocal: pluginApi?.pluginSettings?.ai?.openaiLocal ?? false
   readonly property string openaiBaseUrl: {
     var url = pluginApi?.pluginSettings?.ai?.openaiBaseUrl || "";
@@ -162,13 +170,65 @@ Item {
           pluginApi.openPanel(screen);
           // Wait a bit for clipboard to update before pasting
           Qt.callLater(() => {
-            root.tryPasteImage();
-            if (root.pendingToolCall && root.pendingToolCall.name === "take_screenshot") {
-                confirmToolExecution(true);
+            // For manual screenshots (not tool), just paste the image
+            if (!root.lastToolCallId) {
+                root.tryPasteImage();
+                return;
             }
+            // For tool-initiated screenshots, wait for image processing
+            root.tryPasteImage();
           });
         });
       }
+    }
+  }
+
+  Timer {
+    id: clipboardRetryTimer
+    interval: 500
+    onTriggered: clipboardTypeChecker.running = true
+  }
+
+  function handleScreenshotError(reason) {
+    if (root.screenshotInProgress && root.lastToolCallId) {
+        root.screenshotInProgress = false;
+        var callId = root.lastToolCallId;
+        root.lastToolCallId = "";
+        root.pendingToolCall = null;
+        
+        // Use sendToolResult for errors as it handles the standard flow
+        sendToolResult(callId, "Error: " + reason);
+    } else {
+        Logger.w("EnhancedAssistant", "Screenshot failed: " + reason);
+        root.screenshotInProgress = false;
+    }
+  }
+  
+  // Watch for image processing completion for screenshot tool
+  onPendingImagesChanged: {
+    if (root.screenshotInProgress && root.pendingImages.length > 0) {
+        var callId = root.lastToolCallId;
+        root.lastToolCallId = "";
+        root.pendingToolCall = null;
+        root.screenshotInProgress = false;
+
+        // 1. Add tool result FIRST (to close the tool call)
+        addMessage("tool", "Screenshot captured successfully.", [], null, callId);
+        root.sentToolResultIds.push(callId);
+        
+        // 2. Add user message with image SECOND (as new context)
+        addMessage("user", "Here is the screenshot.", root.pendingImages.map(img => img.base64));
+        root.pendingImages = [];
+
+        // 3. Trigger request manually
+        Qt.callLater(function() {
+            if (!root.isGenerating) {
+                root.isGenerating = true;
+            }
+            root.currentResponse = "";
+            root.currentToolCalls = [];
+            sendOpenAIRequest();
+        });
     }
   }
 
@@ -195,7 +255,11 @@ Item {
   }
 
   function tryPasteImage() {
-    if (!root.hasDependencies) return;
+    if (!root.hasDependencies) {
+      handleScreenshotError("Missing dependencies");
+      return;
+    }
+    root.clipboardRetries = 0;
     clipboardTypeChecker.running = true;
   }
 
@@ -206,14 +270,28 @@ Item {
     onExited: (exitCode) => {
       if (exitCode === 0) {
         var types = stdout.text;
-        if (types.indexOf("image/png") !== -1 || types.indexOf("image/jpeg") !== -1) {
-          processClipboardImage();
+        if (types.indexOf("image/png") !== -1) {
+          processClipboardImage("image/png");
+          return;
         }
+        if (types.indexOf("image/jpeg") !== -1) {
+          processClipboardImage("image/jpeg");
+          return;
+        }
+      }
+
+      // Retry or fail
+      if (root.clipboardRetries < 5) {
+          root.clipboardRetries++;
+          Logger.d("EnhancedAssistant", "Clipboard image not found, retrying... (" + root.clipboardRetries + "/5)");
+          clipboardRetryTimer.start();
+      } else {
+          handleScreenshotError("Clipboard does not contain an image or format is unsupported");
       }
     }
   }
 
-  function processClipboardImage() {
+  function processClipboardImage(mimeType) {
     if (imageProcessor.running) imageProcessor.terminate();
     
     var tempId = Date.now().toString();
@@ -222,8 +300,15 @@ Item {
     var rawPath = cacheDir + "raw_" + tempId + ".png";
     var compressedPath = cacheDir + "comp_" + tempId + ".jpg";
     
-    var cmd = `wl-paste > "${rawPath}" && ` +
-              `ffmpeg -i "${rawPath}" -vf "scale='if(gt(iw,ih),min(${root.maxImageDimension},iw),-1)':'if(gt(ih,iw),min(${root.maxImageDimension},ih),-1)'" -q:v 5 "${compressedPath}" && ` +
+    Logger.d("EnhancedAssistant", "Processing clipboard image with max dimension: " + root.maxImageDimension);
+
+    // Be explicit with wl-paste type if known
+    var typeFlag = mimeType ? `-t "${mimeType}"` : "";
+
+    // Added debug listing of compressed file size
+    var cmd = `wl-paste ${typeFlag} > "${rawPath}" && ` +
+              `ffmpeg -i "${rawPath}" -vf "scale='if(gt(iw,ih),min(${root.maxImageDimension},iw),-1)':'if(gt(ih,iw),min(${root.maxImageDimension},ih),-1)'" -q:v 10 "${compressedPath}" && ` +
+              `ls -lh "${compressedPath}" && ` +
               `base64 -w0 "${compressedPath}" && ` +
               `rm "${rawPath}"`;
               
@@ -241,7 +326,8 @@ Item {
     
     var compressedPath = cacheDir + "comp_" + tempId + ".jpg";
     
-    var cmd = `ffmpeg -i "${path}" -vf "scale='if(gt(iw,ih),min(${root.maxImageDimension},iw),-1)':'if(gt(ih,iw),min(${root.maxImageDimension},ih),-1)'" -q:v 5 "${compressedPath}" && ` +
+    var cmd = `ffmpeg -i "${path}" -vf "scale='if(gt(iw,ih),min(${root.maxImageDimension},iw),-1)':'if(gt(ih,iw),min(${root.maxImageDimension},ih),-1)'" -q:v 10 "${compressedPath}" && ` +
+              `ls -lh "${compressedPath}" && ` +
               `base64 -w0 "${compressedPath}"`;
               
     imageProcessor.command = ["sh", "-c", cmd];
@@ -255,7 +341,17 @@ Item {
     stdout: StdioCollector {}
     onExited: (exitCode) => {
       if (exitCode === 0) {
-        var b64 = stdout.text.trim();
+        var output = stdout.text.trim();
+        // The output will contain the ls -lh line followed by the base64 string
+        // We need to extract just the base64 string (last line usually)
+        var lines = output.split('\n');
+        var b64 = lines[lines.length - 1];
+        
+        // Log the size info for debugging
+        if (lines.length > 1) {
+            Logger.d("EnhancedAssistant", "Compressed image info: " + lines[0]);
+        }
+        
         var compressedPath = cacheDir + "comp_" + tempId + ".jpg";
         
         root.pendingImages = [...root.pendingImages, {
@@ -264,6 +360,7 @@ Item {
         }];
       } else {
         Logger.e("EnhancedAssistant", "Image processing failed with exit code " + exitCode);
+        handleScreenshotError("Image processing failed");
       }
     }
   }
@@ -303,6 +400,11 @@ Item {
     id: payloadFile
     path: root.tempPayloadPath
     watchChanges: false
+    // Block the UI thread until the write completes. This prevents a race
+    // condition where curl starts before the new payload is on disk and reads
+    // the stale payload from the previous request. The payload is just a JSON
+    // string so the block is negligible.
+    blockWrites: true
   }
 
   function loadStateFromCache() {
@@ -318,7 +420,14 @@ Item {
     root.messages = result.messages;
     root.chatInputText = result.chatInputText;
     root.chatInputCursorPosition = result.chatInputCursorPosition;
-    Logger.d("EnhancedAssistant", "Loaded " + root.messages.length + " messages from cache");
+    root.processedToolCallIds = []; // Clear tool tracking on load
+    root.executingToolCallIds = [];
+    root.sentToolResultIds = [];
+    root.pendingToolCall = null;
+    root.lastToolCallId = "";
+    root.currentToolCalls = [];
+    root.screenshotInProgress = false;
+    Logger.i("EnhancedAssistant", "Loaded state: " + root.messages.length + " messages");
   }
 
   // Debounced save timer
@@ -333,6 +442,11 @@ Item {
   function saveState() {
     saveStateQueued = true;
     saveStateTimer.restart();
+  }
+
+  function saveStateImmediate() {
+    saveStateQueued = true;
+    performSaveState();
   }
 
   function performSaveState() {
@@ -350,6 +464,7 @@ Item {
         root.chatInputCursorPosition
       );
       stateCacheFile.setText(dataStr);
+      Logger.d("EnhancedAssistant", "State saved: " + root.messages.length + " messages");
     } catch (e) {
       Logger.e("EnhancedAssistant", "Failed to save state cache: " + e);
     }
@@ -371,9 +486,23 @@ Item {
   }
 
   function clearMessages() {
+    Logger.i("EnhancedAssistant", "Clearing chat history...");
     root.messages = [];
-    saveState();
-    Logger.i("EnhancedAssistant", "Chat history cleared");
+    root.processedToolCallIds = [];
+    root.executingToolCallIds = [];
+    root.sentToolResultIds = [];
+    root.pendingToolCall = null;
+    root.lastToolCallId = "";
+    root.currentToolCalls = [];
+    root.screenshotInProgress = false;
+    root.pendingImages = [];
+    root.isGenerating = false;
+    root.isManuallyStopped = false;
+    root.chatInputText = "";
+    root.chatInputCursorPosition = 0;
+    // Use immediate save to ensure state is persisted before any new messages
+    saveStateImmediate();
+    Logger.i("EnhancedAssistant", "Chat history cleared and saved");
   }
 
   function sendMessage(userMessage) {
@@ -386,6 +515,13 @@ Item {
       return;
     }
 
+    // Clear processed tool call IDs on new user message to prevent stale data
+    root.processedToolCallIds = [];
+    root.executingToolCallIds = [];
+    root.sentToolResultIds = [];
+    
+    Logger.i("EnhancedAssistant", "Sending message with " + root.messages.length + " messages in history");
+    
     addMessage("user", userMessage.trim(), root.pendingImages.map(img => img.base64));
     root.pendingImages = [];
 
@@ -461,6 +597,7 @@ Item {
       if (msg.tool_call_id) entry.tool_call_id = msg.tool_call_id;
       history.push(entry);
     }
+    Logger.d("EnhancedAssistant", "Building conversation history with " + history.length + " messages");
     return history;
   }
 
@@ -529,14 +666,39 @@ Item {
       if (root.currentResponse.trim() !== "" || root.currentToolCalls.length > 0) {
         addMessage("assistant", root.currentResponse.trim(), [], root.currentToolCalls.length > 0 ? root.currentToolCalls : null);
         
-        if (root.currentToolCalls.length > 0) {
-            // We only handle one tool call at a time for simplicity with confirmation
-            var firstCall = root.currentToolCalls[0];
-            root.pendingToolCall = {
-                "id": firstCall.id,
-                "name": firstCall.function.name,
-                "args": firstCall.function.arguments
-            };
+        if (root.currentToolCalls.length > 0 && toolsEnabled) {
+            // Filter out already processed tool calls
+            var newToolCalls = [];
+            for (var j = 0; j < root.currentToolCalls.length; j++) {
+                var tc = root.currentToolCalls[j];
+                if (root.processedToolCallIds.indexOf(tc.id) === -1) {
+                    newToolCalls.push(tc);
+                }
+            }
+            
+            if (newToolCalls.length > 0) {
+                // We only handle one tool call at a time for simplicity with confirmation
+                var firstCall = newToolCalls[0];
+                root.pendingToolCall = {
+                    "id": firstCall.id,
+                    "name": firstCall.function.name,
+                    "args": firstCall.function.arguments
+                };
+                
+                // Mark this tool call as processed
+                root.processedToolCallIds.push(firstCall.id);
+                // Limit array size to prevent memory growth
+                if (root.processedToolCallIds.length > 100) {
+                    root.processedToolCallIds = root.processedToolCallIds.slice(-50);
+                }
+                
+                // Auto-approve if setting is enabled
+                if (root.autoApproveTools) {
+                    Qt.callLater(function() {
+                        confirmToolExecution(true);
+                    });
+                }
+            }
         }
       }
       
@@ -554,6 +716,15 @@ Item {
     var call = root.pendingToolCall;
     root.pendingToolCall = null;
 
+    // Check if already executing
+    if (root.executingToolCallIds.indexOf(call.id) !== -1) {
+        Logger.w("EnhancedAssistant", "Tool call " + call.id + " is already executing, skipping");
+        return;
+    }
+    
+    // Mark as executing
+    root.executingToolCallIds.push(call.id);
+
     if (!confirmed) {
         sendToolResult(call.id, "User rejected tool execution.");
         return;
@@ -566,28 +737,21 @@ Item {
 
     switch (call.name) {
         case "take_screenshot":
-            takeScreenshotAndPaste();
-            // result is sent from postScreenshotTimer
+            // Start screenshot timer directly - postScreenshotTimer will handle result
+            root.lastToolCallId = call.id;
+            root.screenshotInProgress = true;
+            screenshotTimer.start();
             break;
         case "mouse_move":
-            toolProcess.command = ["ydotool", "mousemove", "--", args.x.toString(), args.y.toString()];
-            toolProcess.callId = call.id;
-            toolProcess.running = true;
-            break;
         case "mouse_click":
-            var btn = "0xC0"; // Left
-            if (args.button === "right") btn = "0xC1";
-            if (args.button === "middle") btn = "0xC2";
-            toolProcess.command = ["ydotool", "click", btn];
-            toolProcess.callId = call.id;
-            toolProcess.running = true;
-            break;
         case "type_text":
-            toolProcess.command = ["ydotool", "type", args.text];
-            toolProcess.callId = call.id;
-            toolProcess.running = true;
+            // Hide panel so it doesn't interfere with desktop interaction
+            ensureYdotooldRunning();
+            root.hidePanelAndRunTool(call);
             break;
         case "spawn_application":
+            toolProcess.toolName = "spawn_application";
+            toolProcess.reopenPanel = false;
             toolProcess.command = ["niri", "msg", "action", "spawn", "--", args.command];
             toolProcess.callId = call.id;
             toolProcess.running = true;
@@ -597,25 +761,158 @@ Item {
     }
   }
 
-  Process {
-    id: toolProcess
-    property string callId: ""
-    onExited: (exitCode) => {
-        sendToolResult(callId, exitCode === 0 ? "Success" : "Failed with exit code " + exitCode);
+  // Hides the panel, waits briefly for the compositor to process the change,
+  // then starts the actual tool process. This prevents the panel from
+  // stealing focus or blocking mouse/keyboard interactions on the desktop.
+  function hidePanelAndRunTool(call) {
+    var args = {};
+    try { args = JSON.parse(call.args); } catch (e) {}
+
+    var cmd;
+    switch (call.name) {
+      case "mouse_move":
+        var x = args.x || 0;
+        var y = args.y || 0;
+        cmd = ["sh", "-c", "ydotool mousemove -- " + x + " " + y + " 2>&1"];
+        break;
+      case "mouse_click":
+        var btn = "0xC0"; // Left
+        if (args.button === "right") btn = "0xC1";
+        if (args.button === "middle") btn = "0xC2";
+        cmd = ["sh", "-c", "ydotool click " + btn + " 2>&1"];
+        break;
+      case "type_text":
+        var text = (args.text || "").replace(/"/g, '\\"');
+        cmd = ["sh", "-c", "ydotool type \"" + text + "\" 2>&1"];
+        break;
+    }
+
+    toolProcess.toolName = call.name;
+    toolProcess.callId = call.id;
+    toolProcess.reopenPanel = true;
+    toolProcess._pendingCommand = cmd;
+
+    if (pluginApi) {
+      pluginApi.withCurrentScreen(function (screen) {
+        pluginApi.closePanel(screen);
+        // Brief delay so the compositor can hide the panel before the tool acts
+        panelHideToolTimer.start();
+      });
+    } else {
+      // Fallback: run directly if pluginApi is unavailable
+      toolProcess.command = cmd;
+      toolProcess.running = true;
     }
   }
 
+  Timer {
+    id: panelHideToolTimer
+    interval: 300
+    onTriggered: {
+      toolProcess.command = toolProcess._pendingCommand;
+      toolProcess.running = true;
+    }
+  }
+
+  Process {
+    id: toolProcess
+    property string callId: ""
+    property string toolName: ""
+    property bool reopenPanel: false
+    property var _pendingCommand: []
+    stdout: StdioCollector {}
+    stderr: StdioCollector {}
+    onExited: (exitCode) => {
+        var output = stdout.text || "";
+        var errOutput = stderr.text || "";
+        var resultMsg = "Success";
+        
+        // Remove from executing list
+        var idx = root.executingToolCallIds.indexOf(callId);
+        if (idx !== -1) {
+            root.executingToolCallIds.splice(idx, 1);
+        }
+        
+        if (exitCode !== 0) {
+            resultMsg = "Failed with exit code " + exitCode;
+            if (errOutput.trim() !== "") {
+                resultMsg += ": " + errOutput.trim();
+            } else if (output.trim() !== "") {
+                resultMsg += ": " + output.trim();
+            }
+            
+            // Check for common ydotoold not running error
+            if (errOutput.indexOf("Connection refused") !== -1 || errOutput.indexOf("socket") !== -1 || exitCode === 2) {
+                resultMsg += " (ydotoold daemon may not be running. Start it with: ydotoold &)";
+            }
+        }
+        
+        var savedResultMsg = resultMsg;
+        var savedCallId = callId;
+
+        // Reopen the panel if it was hidden for this tool
+        if (reopenPanel && pluginApi) {
+            pluginApi.withCurrentScreen(function (screen) {
+                pluginApi.openPanel(screen);
+                sendToolResult(savedCallId, savedResultMsg);
+            });
+        } else {
+            sendToolResult(savedCallId, savedResultMsg);
+        }
+        reopenPanel = false;
+    }
+  }
+  
+  // Process to check/start ydotoold daemon
+  Process {
+    id: ydotooldChecker
+    command: ["sh", "-c", "pgrep -x ydotoold > /dev/null || (ydotoold &)"]
+    onExited: (exitCode) => {
+        if (exitCode !== 0) {
+            Logger.w("EnhancedAssistant", "Could not start ydotoold daemon automatically. Please start it manually.");
+        }
+    }
+  }
+  
+  function ensureYdotooldRunning() {
+      ydotooldChecker.running = true;
+  }
+
   function sendToolResult(callId, result) {
+    // Prevent duplicate sends
+    if (root.sentToolResultIds.indexOf(callId) !== -1) {
+        Logger.w("EnhancedAssistant", "Tool result already sent for " + callId + ", skipping duplicate");
+        return;
+    }
+    
     addMessage("tool", result, [], null, callId);
-    root.isGenerating = true;
-    sendOpenAIRequest();
+    // Mark as sent to prevent duplicates
+    root.sentToolResultIds.push(callId);
+    // Limit array size to prevent memory growth
+    if (root.sentToolResultIds.length > 100) {
+        root.sentToolResultIds = root.sentToolResultIds.slice(-50);
+    }
+    
+    // Small delay to ensure message is saved before continuing
+    Qt.callLater(function() {
+        if (!root.isGenerating) {
+            root.isGenerating = true;
+        }
+        root.currentResponse = "";
+        root.currentToolCalls = [];
+        sendOpenAIRequest();
+    });
   }
 
   function sendOpenAIRequest() {
     var history = buildConversationHistory();
-    var commandData = ProviderLogic.buildOpenAICommand(openaiBaseUrl, apiKey, model, systemPrompt, history, temperature, toolDefinitions);
+    // Only include tools if they are enabled
+    var toolsToUse = toolsEnabled ? toolDefinitions : [];
+    var commandData = ProviderLogic.buildOpenAICommand(openaiBaseUrl, apiKey, model, systemPrompt, history, temperature, toolsToUse);
     
-    // Write payload to temp file to avoid command line length limits
+    // Write payload to temp file to avoid command line length limits.
+    // blockWrites is enabled on payloadFile so this call is synchronous —
+    // the file is guaranteed to be on disk before we start curl.
     payloadFile.setText(commandData.payload);
     
     // Use file-based payload delivery instead of stdin

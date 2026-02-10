@@ -16,11 +16,13 @@ ColumnLayout {
   property string editModel: pluginApi?.pluginSettings?.ai?.model || pluginApi?.manifest?.metadata?.defaultSettings?.ai?.model || "gpt-4o-mini"
   property string editApiKey: pluginApi?.pluginSettings?.ai?.apiKey || ""
   property real editTemperature: pluginApi?.pluginSettings?.ai?.temperature || 0.7
-  property string editSystemPrompt: pluginApi?.pluginSettings?.ai?.systemPrompt || ""
+  property string editSystemPrompt: pluginApi?.pluginSettings?.ai?.systemPrompt || "You are a helpful AI assistant with access to system automation tools. When using tools to interact with the system (mouse, keyboard, screenshots), always follow these guidelines:\n\n1. Take a screenshot BEFORE performing actions to see the current state\n2. After performing any mouse or keyboard action, immediately take another screenshot to confirm the result\n3. Describe what you see in screenshots and explain your actions\n4. Use the spawn_application tool to open programs when needed\n5. Be precise with mouse coordinates - use the screenshot to determine exact positions\n6. After completing a task, take a final screenshot to show the end result\n\nRemember: Screenshots are your eyes - use them frequently to verify your actions and understand the current system state."
   property bool editOpenAiLocal: pluginApi?.pluginSettings?.ai?.openaiLocal ?? false
   property string editOpenAiBaseUrl: pluginApi?.pluginSettings?.ai?.openaiBaseUrl || "https://api.openai.com/v1/chat/completions"
   property int editMaxHistoryLength: pluginApi?.pluginSettings?.maxHistoryLength || 100
   property int editMaxImageDimension: pluginApi?.pluginSettings?.ai?.maxImageDimension || 800
+  property bool editToolsEnabled: pluginApi?.pluginSettings?.ai?.toolsEnabled ?? true
+  property bool editAutoApproveTools: pluginApi?.pluginSettings?.ai?.autoApproveTools ?? false
 
   // Panel Settings
   property bool editPanelDetached: pluginApi?.pluginSettings?.panelDetached ?? true
@@ -212,6 +214,32 @@ ColumnLayout {
     }
   }
 
+  NDivider { Layout.fillWidth: true; Layout.margins: Style.marginM }
+
+  NText {
+    text: "Tools & Automation"
+    pointSize: Style.fontSizeM
+    font.weight: Font.Bold
+    color: Color.mOnSurface
+  }
+
+  NToggle {
+    Layout.fillWidth: true
+    label: "Enable AI Tools"
+    description: "Allow AI to use system automation tools (mouse, keyboard, screenshots)"
+    checked: root.editToolsEnabled
+    onToggled: function (checked) { root.editToolsEnabled = checked; }
+  }
+
+  NToggle {
+    Layout.fillWidth: true
+    label: "Auto-approve Tools"
+    description: "Automatically execute tool calls without confirmation prompt"
+    checked: root.editAutoApproveTools
+    visible: root.editToolsEnabled
+    onToggled: function (checked) { root.editAutoApproveTools = checked; }
+  }
+
   function saveSettings() {
     if (!pluginApi) return;
     if (!pluginApi.pluginSettings.ai) pluginApi.pluginSettings.ai = {};
@@ -224,6 +252,8 @@ ColumnLayout {
     pluginApi.pluginSettings.ai.openaiBaseUrl = root.editOpenAiBaseUrl;
     pluginApi.pluginSettings.maxHistoryLength = root.editMaxHistoryLength;
     pluginApi.pluginSettings.ai.maxImageDimension = root.editMaxImageDimension;
+    pluginApi.pluginSettings.ai.toolsEnabled = root.editToolsEnabled;
+    pluginApi.pluginSettings.ai.autoApproveTools = root.editAutoApproveTools;
 
     pluginApi.pluginSettings.panelDetached = root.editPanelDetached;
     pluginApi.pluginSettings.panelPosition = root.editPanelPosition;
