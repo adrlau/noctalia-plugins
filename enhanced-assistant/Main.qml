@@ -16,16 +16,89 @@ Item {
   property var messages: []
   property bool isGenerating: false
   property string currentResponse: ""
+  property var currentToolCalls: []
   property string errorMessage: ""
   property bool isManuallyStopped: false
+
+  // Tool Confirmation State
+  property var pendingToolCall: null // { id, name, args }
 
   // Cache directory for state (messages)
   readonly property string cacheDir: typeof Settings !== 'undefined' && Settings.cacheDir ? Settings.cacheDir + "plugins/enhanced-assistant/" : ""
   readonly property string stateCachePath: cacheDir + "state.json"
+  readonly property string tempPayloadPath: cacheDir + "payload.json"
 
   property string chatInputText: "" // Chat input state
   property int chatInputCursorPosition: 0 // Chat input cursor position
   property var pendingImages: [] // Array of { url: "path/to/local/preview", base64: "..." }
+
+  // Tool Definitions
+  readonly property var toolDefinitions: [
+    {
+      "type": "function",
+      "function": {
+        "name": "mouse_move",
+        "description": "Move the mouse cursor to a specific coordinate",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "x": { "type": "integer", "description": "X coordinate" },
+            "y": { "type": "integer", "description": "Y coordinate" }
+          },
+          "required": ["x", "y"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mouse_click",
+        "description": "Click a mouse button",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "button": { "type": "string", "description": "Button to click (left, right, middle)", "enum": ["left", "right", "middle"] }
+          },
+          "required": ["button"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "type_text",
+        "description": "Type text using the keyboard",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "description": "Text to type" }
+          },
+          "required": ["text"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "take_screenshot",
+        "description": "Take a screenshot of the current screen and add it to the chat"
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "spawn_application",
+        "description": "Spawn an application using niri msg action spawn",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": { "type": "string", "description": "Command to run (e.g. 'alacritty', 'firefox')" }
+          },
+          "required": ["command"]
+        }
+      }
+    }
+  ]
 
   // OpenAI Settings
   readonly property string model: pluginApi?.pluginSettings?.ai?.model || "gpt-4o-mini"
@@ -82,7 +155,7 @@ Item {
 
   Timer {
     id: postScreenshotTimer
-    interval: 500
+    interval: 2000 // Increased from 500/1500 as requested
     onTriggered: {
       if (pluginApi) {
         pluginApi.withCurrentScreen(function (screen) {
@@ -90,6 +163,9 @@ Item {
           // Wait a bit for clipboard to update before pasting
           Qt.callLater(() => {
             root.tryPasteImage();
+            if (root.pendingToolCall && root.pendingToolCall.name === "take_screenshot") {
+                confirmToolExecution(true);
+            }
           });
         });
       }
@@ -108,11 +184,11 @@ Item {
 
   Process {
     id: dependencyChecker
-    command: ["sh", "-c", "which ffmpeg && which wl-paste"]
+    command: ["sh", "-c", "which ffmpeg && which wl-paste && which ydotool"]
     onExited: (exitCode) => {
       if (exitCode !== 0) {
         root.hasDependencies = false;
-        root.dependencyError = "Missing dependencies (ffmpeg or wl-paste). Multimodal support disabled.";
+        root.dependencyError = "Missing dependencies (ffmpeg, wl-paste, or ydotool). Multimodal and tool support limited.";
         Logger.w("EnhancedAssistant", root.dependencyError);
       }
     }
@@ -222,6 +298,13 @@ Item {
     }
   }
 
+  // Temporary payload file for API requests
+  FileView {
+    id: payloadFile
+    path: root.tempPayloadPath
+    watchChanges: false
+  }
+
   function loadStateFromCache() {
     var content = stateCacheFile.text();
     var result = ProviderLogic.processLoadedState(content);
@@ -272,12 +355,14 @@ Item {
     }
   }
 
-  function addMessage(role, content, images) {
+  function addMessage(role, content, images, tool_calls, tool_call_id) {
     var newMessage = {
       "id": Date.now().toString(),
       "role": role,
-      "content": content,
+      "content": content || null,
       "images": images || [],
+      "tool_calls": tool_calls || null,
+      "tool_call_id": tool_call_id || null,
       "timestamp": new Date().toISOString()
     };
     root.messages = [...root.messages, newMessage];
@@ -307,6 +392,7 @@ Item {
     root.isGenerating = true;
     root.isManuallyStopped = false;
     root.currentResponse = "";
+    root.currentToolCalls = [];
     root.errorMessage = "";
 
     sendOpenAIRequest();
@@ -343,6 +429,7 @@ Item {
       saveState();
       root.isGenerating = true;
       root.currentResponse = "";
+      root.currentToolCalls = [];
       root.errorMessage = "";
       sendOpenAIRequest();
     }
@@ -353,21 +440,26 @@ Item {
     root.isManuallyStopped = true;
     if (openaiProcess.running) openaiProcess.running = false;
     root.isGenerating = false;
-    if (root.currentResponse.trim() !== "") {
-      root.addMessage("assistant", root.currentResponse.trim());
+    if (root.currentResponse.trim() !== "" || root.currentToolCalls.length > 0) {
+        // Save current progress if any
+        addMessage("assistant", root.currentResponse.trim(), [], root.currentToolCalls.length > 0 ? root.currentToolCalls : null);
     }
     root.currentResponse = "";
+    root.currentToolCalls = [];
   }
 
   function buildConversationHistory() {
     var history = [];
     for (var i = 0; i < root.messages.length; i++) {
       var msg = root.messages[i];
-      history.push({
+      var entry = {
         "role": msg.role,
         "content": msg.content,
         "images": msg.images || []
-      });
+      };
+      if (msg.tool_calls) entry.tool_calls = msg.tool_calls;
+      if (msg.tool_call_id) entry.tool_call_id = msg.tool_call_id;
+      history.push(entry);
     }
     return history;
   }
@@ -393,19 +485,31 @@ Item {
     function handleStreamData(data) {
       var result = ProviderLogic.parseOpenAIStream(data);
       if (!result) return;
+      
       if (result.content) {
         root.currentResponse += result.content;
+      } else if (result.tool_calls) {
+        for (var i = 0; i < result.tool_calls.length; i++) {
+          var call = result.tool_calls[i];
+          var index = call.index;
+          
+          if (!root.currentToolCalls[index]) {
+            root.currentToolCalls[index] = {
+              "id": call.id || "",
+              "type": "function",
+              "function": {
+                "name": (call.function && call.function.name) ? call.function.name : "",
+                "arguments": (call.function && call.function.arguments) ? call.function.arguments : ""
+              }
+            };
+          } else {
+            if (call.id) root.currentToolCalls[index].id = call.id;
+            if (call.function && call.function.name) root.currentToolCalls[index].function.name += call.function.name;
+            if (call.function && call.function.arguments) root.currentToolCalls[index].function.arguments += call.function.arguments;
+          }
+        }
       } else if (result.error) {
         Logger.e("EnhancedAssistant", "OpenAI stream error: " + result.error);
-      } else if (result.raw) {
-        openaiProcess.buffer += result.raw;
-        try {
-          var errorJson = JSON.parse(openaiProcess.buffer);
-          if (errorJson.error) {
-            root.errorMessage = errorJson.error.message || "API error";
-          }
-          openaiProcess.buffer = "";
-        } catch (e) {}
       }
     }
 
@@ -415,27 +519,117 @@ Item {
         return;
       }
       root.isGenerating = false;
-      if (exitCode !== 0 && root.currentResponse === "") {
+      if (exitCode !== 0 && root.currentResponse === "" && root.currentToolCalls.length === 0) {
         if (root.errorMessage === "") {
           root.errorMessage = openaiLocal ? "Local inference server is not reachable." : "Request failed";
         }
         return;
       }
-      if (root.currentResponse.trim() !== "") {
-        root.addMessage("assistant", root.currentResponse.trim());
+
+      if (root.currentResponse.trim() !== "" || root.currentToolCalls.length > 0) {
+        addMessage("assistant", root.currentResponse.trim(), [], root.currentToolCalls.length > 0 ? root.currentToolCalls : null);
+        
+        if (root.currentToolCalls.length > 0) {
+            // We only handle one tool call at a time for simplicity with confirmation
+            var firstCall = root.currentToolCalls[0];
+            root.pendingToolCall = {
+                "id": firstCall.id,
+                "name": firstCall.function.name,
+                "args": firstCall.function.arguments
+            };
+        }
       }
+      
       root.chatInputText = "";
       root.chatInputCursorPosition = 0;
       root.saveState();
       openaiProcess.buffer = "";
+      root.currentToolCalls = [];
     }
+  }
+
+  function confirmToolExecution(confirmed) {
+    if (!root.pendingToolCall) return;
+    
+    var call = root.pendingToolCall;
+    root.pendingToolCall = null;
+
+    if (!confirmed) {
+        sendToolResult(call.id, "User rejected tool execution.");
+        return;
+    }
+
+    var args = {};
+    try {
+        args = JSON.parse(call.args);
+    } catch (e) {}
+
+    switch (call.name) {
+        case "take_screenshot":
+            takeScreenshotAndPaste();
+            // result is sent from postScreenshotTimer
+            break;
+        case "mouse_move":
+            toolProcess.command = ["ydotool", "mousemove", "--", args.x.toString(), args.y.toString()];
+            toolProcess.callId = call.id;
+            toolProcess.running = true;
+            break;
+        case "mouse_click":
+            var btn = "0xC0"; // Left
+            if (args.button === "right") btn = "0xC1";
+            if (args.button === "middle") btn = "0xC2";
+            toolProcess.command = ["ydotool", "click", btn];
+            toolProcess.callId = call.id;
+            toolProcess.running = true;
+            break;
+        case "type_text":
+            toolProcess.command = ["ydotool", "type", args.text];
+            toolProcess.callId = call.id;
+            toolProcess.running = true;
+            break;
+        case "spawn_application":
+            toolProcess.command = ["niri", "msg", "action", "spawn", "--", args.command];
+            toolProcess.callId = call.id;
+            toolProcess.running = true;
+            break;
+        default:
+            sendToolResult(call.id, "Error: Unknown tool " + call.name);
+    }
+  }
+
+  Process {
+    id: toolProcess
+    property string callId: ""
+    onExited: (exitCode) => {
+        sendToolResult(callId, exitCode === 0 ? "Success" : "Failed with exit code " + exitCode);
+    }
+  }
+
+  function sendToolResult(callId, result) {
+    addMessage("tool", result, [], null, callId);
+    root.isGenerating = true;
+    sendOpenAIRequest();
   }
 
   function sendOpenAIRequest() {
     var history = buildConversationHistory();
-    var commandData = ProviderLogic.buildOpenAICommand(openaiBaseUrl, apiKey, model, systemPrompt, history, temperature);
+    var commandData = ProviderLogic.buildOpenAICommand(openaiBaseUrl, apiKey, model, systemPrompt, history, temperature, toolDefinitions);
+    
+    // Write payload to temp file to avoid command line length limits
+    payloadFile.setText(commandData.payload);
+    
+    // Use file-based payload delivery instead of stdin
+    var args = commandData.args.slice(); // Copy array
+    // Replace placeholder with the actual file path
+    for (var i = 0; i < args.length; i++) {
+        if (args[i] === "@PAYLOAD_PATH_PLACEHOLDER") {
+            args[i] = "@" + tempPayloadPath;
+            break;
+        }
+    }
+    
     openaiProcess.buffer = "";
-    openaiProcess.command = commandData.args;
+    openaiProcess.command = args;
     openaiProcess.running = true;
   }
 

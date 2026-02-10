@@ -4,7 +4,7 @@
 // AI Provider Logic
 // ===================================
 
-function buildOpenAICommand(endpointUrl, apiKey, model, systemPrompt, history, temperature) {
+function buildOpenAICommand(endpointUrl, apiKey, model, systemPrompt, history, temperature, tools) {
   var messages = [];
 
   if (systemPrompt && systemPrompt.trim() !== "") {
@@ -20,6 +20,14 @@ function buildOpenAICommand(endpointUrl, apiKey, model, systemPrompt, history, t
     var formattedMsg = {
       "role": msg.role
     };
+
+    if (msg.tool_calls) {
+      formattedMsg.tool_calls = msg.tool_calls;
+    }
+
+    if (msg.tool_call_id) {
+      formattedMsg.tool_call_id = msg.tool_call_id;
+    }
 
     if (msg.images && msg.images.length > 0) {
       var content = [];
@@ -38,7 +46,7 @@ function buildOpenAICommand(endpointUrl, apiKey, model, systemPrompt, history, t
         });
       }
       formattedMsg.content = content;
-    } else {
+    } else if (msg.content !== undefined) {
       formattedMsg.content = msg.content;
     }
 
@@ -52,13 +60,17 @@ function buildOpenAICommand(endpointUrl, apiKey, model, systemPrompt, history, t
     "stream": true
   };
 
+  if (tools && tools.length > 0) {
+    payload.tools = tools;
+  }
+
   var args = ["curl", "-s", "-S", "--no-buffer", "-X", "POST", "-H", "Content-Type: application/json"];
 
   if (apiKey && apiKey.trim() !== "") {
     args.push("-H", "Authorization: Bearer " + apiKey);
   }
 
-  args.push("-d", JSON.stringify(payload));
+  args.push("-d", "@PAYLOAD_PATH_PLACEHOLDER");
   args.push(endpointUrl);
 
   return {
@@ -85,14 +97,22 @@ function parseOpenAIStream(data) {
     try {
       var json = JSON.parse(jsonStr);
       if (json.choices && json.choices[0]) {
-        if (json.choices[0].delta && json.choices[0].delta.content) {
-          return {
-            content: json.choices[0].delta.content
-          };
-        } else if (json.choices[0].message && json.choices[0].message.content) {
-          return {
-            content: json.choices[0].message.content
-          };
+        if (json.choices[0].delta) {
+          if (json.choices[0].delta.content) {
+            return {
+              content: json.choices[0].delta.content
+            };
+          } else if (json.choices[0].delta.tool_calls) {
+            return {
+              tool_calls: json.choices[0].delta.tool_calls
+            };
+          }
+        } else if (json.choices[0].message) {
+            if (json.choices[0].message.content) {
+                return { content: json.choices[0].message.content };
+            } else if (json.choices[0].message.tool_calls) {
+                return { tool_calls: json.choices[0].message.tool_calls };
+            }
         }
       }
     } catch (e) {

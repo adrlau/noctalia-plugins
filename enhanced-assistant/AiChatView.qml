@@ -21,9 +21,10 @@ Item {
   property string initialInputText: mainInstance?.chatInputText || ""
   property int initialCursorPosition: mainInstance?.chatInputCursorPosition || 0
 
-  readonly property string model: mainInstance?.model || ""
+    readonly property string model: mainInstance?.model || ""
 
   property string enlargedImage: ""
+  readonly property var pendingToolCall: mainInstance?.pendingToolCall || null
 
   DropArea {
     anchors.fill: parent
@@ -358,6 +359,61 @@ Item {
       }
     }
 
+    // Tool Confirmation
+    Rectangle {
+      Layout.fillWidth: true
+      Layout.preferredHeight: toolConfirmRow.implicitHeight + Style.marginS * 2
+      color: Color.mSurfaceVariant
+      radius: Style.radiusM
+      visible: root.pendingToolCall !== null
+
+      RowLayout {
+        id: toolConfirmRow
+        anchors.fill: parent
+        anchors.margins: Style.marginS
+        spacing: Style.marginM
+
+        NIcon {
+          icon: "settings-automation"
+          color: Color.mPrimary
+          pointSize: Style.fontSizeL
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 2
+          NText {
+            text: "AI wants to execute a command:"
+            pointSize: Style.fontSizeS
+            font.weight: Font.Bold
+          }
+          NText {
+            text: root.pendingToolCall ? (root.pendingToolCall.name + "(" + root.pendingToolCall.args + ")") : ""
+            pointSize: Style.fontSizeXS
+            color: Color.mOnSurfaceVariant
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+          }
+        }
+
+        Row {
+          spacing: Style.marginS
+          NButton {
+            text: "Allow"
+            backgroundColor: Color.mPrimary
+            textColor: Color.mOnPrimary
+            onClicked: mainInstance.confirmToolExecution(true)
+          }
+          NButton {
+            text: "Deny"
+            backgroundColor: Color.mSurface
+            textColor: Color.mOnSurface
+            onClicked: mainInstance.confirmToolExecution(false)
+          }
+        }
+      }
+    }
+
     // Input area
     ColumnLayout {
       Layout.fillWidth: true
@@ -501,8 +557,8 @@ Item {
           NIconButton {
             id: sendButton
             icon: isGenerating ? "player-stop" : "send"
-            colorFg: isGenerating ? Color.mError : ((inputField.text.trim() !== "" || mainInstance.pendingImages.length > 0) ? Color.mPrimary : Color.mOnSurfaceVariant)
-            enabled: isGenerating || inputField.text.trim() !== "" || mainInstance.pendingImages.length > 0
+            colorFg: isGenerating ? Color.mError : ((inputField.text.trim() !== "" || (mainInstance?.pendingImages?.length > 0)) ? Color.mPrimary : Color.mOnSurfaceVariant)
+            enabled: isGenerating || inputField.text.trim() !== "" || (mainInstance?.pendingImages?.length > 0)
             tooltipText: isGenerating ? (pluginApi?.tr("chat.stop") || "Stop generation") : (pluginApi?.tr("chat.send") || "Send")
             onClicked: {
               if (isGenerating) {
@@ -526,31 +582,76 @@ Item {
     visible: root.enlargedImage !== ""
     z: 100 // High z-order to cover everything
 
+    property real zoomLevel: 1.0
+
+    onVisibleChanged: {
+      if (!visible) zoomLevel = 1.0;
+    }
+
     MouseArea {
       anchors.fill: parent
       onClicked: root.enlargedImage = ""
+      onWheel: (wheel) => {
+        if (wheel.angleDelta.y > 0) {
+          lightbox.zoomLevel = Math.min(5.0, lightbox.zoomLevel + 0.1);
+        } else {
+          lightbox.zoomLevel = Math.max(1.0, lightbox.zoomLevel - 0.1);
+        }
+      }
     }
 
+    Flickable {
+      anchors.fill: parent
+      contentWidth: zoomArea.width
+      contentHeight: zoomArea.height
+      boundsBehavior: Flickable.StopAtBounds
+      clip: true
+
+      Item {
+        id: zoomArea
+        width: Math.max(lightbox.width, enlargedImg.width * lightbox.zoomLevel)
+        height: Math.max(lightbox.height, enlargedImg.height * lightbox.zoomLevel)
+
+        Image {
+          id: enlargedImg
+          anchors.centerIn: parent
+          width: Math.min(lightbox.width, implicitWidth) * lightbox.zoomLevel
+          height: Math.min(lightbox.height, implicitHeight) * lightbox.zoomLevel
+          source: root.enlargedImage
+          fillMode: Image.PreserveAspectFit
+          asynchronous: true
+        }
+      }
+    }
+
+    // Controls overlay
     Item {
       anchors.fill: parent
-      anchors.margins: Style.marginXXL
+      anchors.margins: Style.marginM
+      visible: lightbox.visible
 
-      Image {
-        id: enlargedImg
-        anchors.centerIn: parent
-        width: Math.min(parent.width, implicitWidth)
-        height: Math.min(parent.height, implicitHeight)
-        source: root.enlargedImage
-        fillMode: Image.PreserveAspectFit
-        asynchronous: true
+      // Zoom indicator
+      Rectangle {
+        anchors.bottom: parent.bottom
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: 80
+        height: 30
+        radius: 15
+        color: Qt.alpha(Color.mSurface, 0.8)
+        border.color: Color.mOutline
+        
+        NText {
+          anchors.centerIn: parent
+          text: (lightbox.zoomLevel * 100).toFixed(0) + "%"
+          color: Color.mOnSurface
+          pointSize: Style.fontSizeS
+        }
       }
 
       // Close button
       Rectangle {
-        anchors.right: enlargedImg.right
-        anchors.top: enlargedImg.top
-        anchors.rightMargin: -Style.marginS
-        anchors.topMargin: -Style.marginS
+        anchors.right: parent.right
+        anchors.top: parent.top
         width: 32
         height: 32
         radius: 16
@@ -573,14 +674,15 @@ Item {
       }
     }
 
-    // Keyboard shortcut to close
+    // Keyboard shortcuts
     Keys.onEscapePressed: root.enlargedImage = ""
+    Keys.onDigit0Pressed: lightbox.zoomLevel = 1.0
     focus: visible
   }
 
   function sendMessage() {
     var text = inputField.text.trim();
-    var hasImages = mainInstance && mainInstance.pendingImages && mainInstance.pendingImages.length > 0;
+    var hasImages = mainInstance?.pendingImages?.length > 0;
     if (text === "" && !hasImages)
       return;
     if (!mainInstance)
